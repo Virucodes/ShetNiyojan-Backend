@@ -55,8 +55,51 @@ transport_logger.addHandler(file_handler)
 transport_logger.setLevel(logging.INFO)
 
 # Mandi API Configuration
-MANDI_API_BASE_URL = "https://api.data.gov.in/resource/9ef84268-d588-465a-a308-a864a43d0070"
-MANDI_API_KEY = "579b464db66ec23bdd000001f5a25a2a2b0742cb77a83bfe30e97ba1" 
+MANDI_API_BASE_URL = "https://api.data.gov.in/resource/35985678-0d79-46b4-9ed6-6f13308a1d24"
+MANDI_API_KEY = "579b464db66ec23bdd0000010582a7863e934ee27f4b23c034396353"
+
+# Predefined district coordinates for mapping and distance calculations
+district_coordinates = {
+    # Maharashtra Districts
+    "Pune": (18.5204, 73.8567),
+    "Mumbai": (19.0760, 72.8777),
+    "Nashik": (19.9975, 73.7898),
+    "Nagpur": (21.1458, 79.0882),
+    "Kolhapur": (16.7050, 74.2433),
+    "Solapur": (17.6599, 75.9064),
+    "Aurangabad": (19.8762, 75.3433),
+    "Ahmednagar": (19.0948, 74.7480),
+    "Satara": (17.6805, 73.9979),
+    "Jalgaon": (21.0077, 75.5626),
+    # Gujarat Districts
+    "Ahmedabad": (23.0225, 72.5714),
+    "Surat": (21.1702, 72.8311),
+    "Vadodara": (22.3072, 73.1812),
+    "Rajkot": (22.3039, 70.8022),
+    "Anand": (22.5645, 72.9289),
+    "Mehsana": (23.6015, 72.3995),
+    # Karnataka Districts
+    "Bangalore": (12.9716, 77.5946),
+    "Belgaum": (15.8497, 74.4977),
+    "Dharwad": (15.4589, 75.0078),
+    "Mysore": (12.2958, 76.6394),
+    "Kolar": (13.1368, 78.1292),
+    "Tumkur": (13.3409, 77.1006),
+    # Madhya Pradesh Districts
+    "Indore": (22.7196, 75.8577),
+    "Bhopal": (23.2599, 77.4126),
+    "Ujjain": (23.1760, 75.7885),
+    "Jabalpur": (23.1815, 79.9864),
+    "Dhar": (22.5978, 75.3040),
+    "Dewas": (22.9623, 76.0508),
+    # Uttar Pradesh Districts
+    "Lucknow": (26.8467, 80.9462),
+    "Kanpur": (26.4499, 80.3319),
+    "Varanasi": (25.3176, 82.9739),
+    "Agra": (27.1767, 78.0081),
+    "Meerut": (28.9845, 77.7064),
+    "Hapur": (28.7306, 77.7758)
+} 
 
 # Simulated city data with coordinates (latitude, longitude)
 city_data = {
@@ -1210,6 +1253,221 @@ def optimize_transport():
         transport_logger.error(f"Optimization failed: {str(e)}")
         return jsonify({"error": f"Optimization failed: {str(e)}", "status": "Error"}), 500
 
+# ------------------ Dynamic Mandi API Endpoints ------------------
+@app.route('/api/mandi/commodities', methods=['GET'])
+def get_mandi_commodities():
+    try:
+        state = request.args.get("state", "Maharashtra")
+        district = request.args.get("district", "Pune")
+        
+        params = {
+            "api-key": MANDI_API_KEY,
+            "format": "json",
+            "limit": 100,
+            "filters[State]": state,
+            "filters[District]": district
+        }
+        
+        url = MANDI_API_BASE_URL
+        print(f"Fetching commodities from Mandi API for State={state}, District={district}...")
+        response = requests.get(url, params=params, timeout=12)
+        
+        if response.status_code == 200:
+            data = response.json()
+            if "records" in data and data["records"]:
+                commodities = set()
+                for record in data["records"]:
+                    if "commodity" in record and record["commodity"]:
+                        commodities.add(record["commodity"])
+                
+                return jsonify({
+                    "status": "success",
+                    "commodities": sorted(list(commodities)),
+                    "note": f"Loaded commodities from real-time Mandi API for {state}/{district}"
+                }), 200
+        
+        # Fallback if status code is not 200 or no records
+        print(f"Mandi API returned {response.status_code} or empty records. Using default commodities list.")
+        default_commodities = ["Rice", "Wheat", "Maize", "Potato", "Onion", "Tomato", "Soybean", "Sugarcane", "Cotton", "Jowar", "Bajra"]
+        return jsonify({
+            "status": "success",
+            "commodities": default_commodities,
+            "note": "Using default commodities list (Mandi API fallback)"
+        }), 200
+        
+    except Exception as e:
+        print(f"Error fetching Mandi commodities: {str(e)}")
+        default_commodities = ["Rice", "Wheat", "Maize", "Potato", "Onion", "Tomato", "Soybean", "Sugarcane", "Cotton", "Jowar", "Bajra"]
+        return jsonify({
+            "status": "success",
+            "commodities": default_commodities,
+            "note": "Using default commodities list (Mandi API error fallback)"
+        }), 200
+
+
+@app.route('/api/mandi/optimize-transport', methods=['POST'])
+def optimize_mandi_transport():
+    try:
+        data = request.json or {}
+        state = data.get("state", "Maharashtra")
+        district = data.get("district", "Pune")
+        crop = data.get("crop", "Rice")
+        crop_weight_kg = float(data.get("crop_weight_kg", 100.0))
+        
+        # Determine starting coordinates
+        start_coords = district_coordinates.get(district, (18.5204, 73.8567))
+        
+        # 1. Query Mandi API
+        params = {
+            "api-key": MANDI_API_KEY,
+            "format": "json",
+            "limit": 100,
+            "filters[State]": state,
+            "filters[District]": district
+        }
+        
+        records = []
+        api_success = False
+        try:
+            print(f"Querying Mandi API for transport optimization: State={state}, District={district}...")
+            response = requests.get(MANDI_API_BASE_URL, params=params, timeout=12)
+            if response.status_code == 200:
+                data_json = response.json()
+                if "records" in data_json and data_json["records"]:
+                    records = data_json["records"]
+                    api_success = True
+                    print(f"Successfully retrieved {len(records)} records from Mandi API.")
+        except Exception as err:
+            print(f"Mandi API call failed or timed out: {str(err)}")
+            
+        # Filter records by commodity
+        matching_records = []
+        if api_success:
+            for r in records:
+                r_commodity = r.get("commodity", "")
+                if r_commodity and r_commodity.lower() == crop.lower():
+                    matching_records.append(r)
+                    
+        # 2. Process records if we have matching live data
+        city_details = {}
+        best_market = None
+        best_net_profit = -999999.0
+        
+        # Predefined coordinates for common markets (offsets from district center)
+        def get_deterministic_coords(market_name, base_coords):
+            h = abs(hash(market_name))
+            lat_offset = ((h % 100) / 400.0) - 0.125
+            lng_offset = (((h // 100) % 100) / 400.0) - 0.125
+            return (base_coords[0] + lat_offset, base_coords[1] + lng_offset)
+            
+        if matching_records:
+            print(f"Found {len(matching_records)} matching records for crop '{crop}'")
+            for r in matching_records:
+                market = r.get("market", "Unknown Market")
+                try:
+                    price_per_kg = float(r.get("modal_price", 0.0)) / 100.0
+                except (ValueError, TypeError):
+                    price_per_kg = 0.0
+                    
+                if price_per_kg <= 0.0:
+                    continue
+                    
+                lat, lng = get_deterministic_coords(market, start_coords)
+                distance = haversine(start_coords, (lat, lng))
+                
+                if distance < 5:
+                    transport_cost = 0.0
+                else:
+                    transport_cost = distance * 0.02 * crop_weight_kg
+                    
+                revenue = price_per_kg * crop_weight_kg
+                net_profit = revenue - transport_cost
+                
+                city_details[market] = {
+                    "price_per_kg": round(price_per_kg, 2),
+                    "transport_cost": round(transport_cost, 2),
+                    "net_profit": round(net_profit, 2),
+                    "distance": round(distance, 1),
+                    "coordinates": [round(lat, 4), round(lng, 4)]
+                }
+                
+                if net_profit > best_net_profit:
+                    best_net_profit = net_profit
+                    best_market = market
+        
+        # 3. Fallback: If no API records matched or API timed out, generate simulated markets
+        using_fallback = False
+        if not city_details:
+            using_fallback = True
+            print("No matching Mandi records. Generating simulated markets as fallback.")
+            
+            base_prices = {
+                "Rice": 42.0,
+                "Wheat": 35.0,
+                "Maize": 28.0,
+                "Potato": 22.0,
+                "Onion": 32.0,
+                "Tomato": 25.0,
+                "Soybean": 45.0,
+                "Sugarcane": 3.5,
+                "Cotton": 65.0,
+                "Jowar": 30.0,
+                "Bajra": 32.0
+            }
+            base_p = base_prices.get(crop, 30.0)
+            
+            sim_markets = [
+                (f"{district} Center Mandi", 0.0, 0.95),
+                (f"{district} North Market", 25.0, 1.05),
+                (f"{district} East Plaza", 60.0, 1.15),
+                (f"{district} Suburban Mandi", 15.0, 0.98)
+            ]
+            
+            for m_name, dist, multiplier in sim_markets:
+                price = base_p * multiplier
+                lat, lng = get_deterministic_coords(m_name, start_coords)
+                
+                if dist < 5:
+                    transport_cost = 0.0
+                else:
+                    transport_cost = dist * 0.02 * crop_weight_kg
+                    
+                revenue = price * crop_weight_kg
+                net_profit = revenue - transport_cost
+                
+                city_details[m_name] = {
+                    "price_per_kg": round(price, 2),
+                    "transport_cost": round(transport_cost, 2),
+                    "net_profit": round(net_profit, 2),
+                    "distance": dist,
+                    "coordinates": [round(lat, 4), round(lng, 4)]
+                }
+                
+                if net_profit > best_net_profit:
+                    best_net_profit = net_profit
+                    best_market = m_name
+                    
+        starting_market = list(city_details.keys())[0]
+        recommend_transport = best_market != starting_market and city_details[best_market]["net_profit"] > city_details[starting_market]["net_profit"]
+        
+        response_payload = {
+            "status": "success",
+            "current_city": starting_market,
+            "best_city": best_market,
+            "best_net_profit": round(best_net_profit, 2),
+            "recommend_transport": recommend_transport,
+            "city_details": city_details,
+            "note": "Using simulated Mandi data due to timeout" if using_fallback else "Dynamic optimization based on live Mandi API"
+        }
+        
+        return jsonify(response_payload), 200
+        
+    except Exception as e:
+        transport_logger.error(f"Mandi optimization failed: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": f"Optimization failed: {str(e)}", "status": "Error"}), 500
+
 @app.route('/api/cities', methods=['GET'])
 def get_cities():
     return jsonify({
@@ -2038,6 +2296,388 @@ def mobile_activity():
 # Call the seed function at startup
 seed_demo_data()
 
+
+# ------------------ Yield Forecast API ------------------
+@app.route('/api/yields/<yield_id>/forecast', methods=['GET'])
+@token_required
+def get_yield_forecast(current_user, yield_id):
+    try:
+        print(f"Generating forecast for yield {yield_id} and user {current_user.get('_id')}")
+        
+        # 1. Fetch yield data
+        yield_obj = yields_collection.find_one({"_id": ObjectId(yield_id)})
+        if not yield_obj:
+            return jsonify({"status": "error", "message": "Yield not found"}), 404
+            
+        # Check ownership (match update_yield logic, allow test user)
+        if str(yield_obj.get('userId')) != str(current_user.get('_id')) and current_user.get('fullname') != "Test User":
+            return jsonify({"status": "error", "message": "Unauthorized to access this yield forecast"}), 403
+
+        # 2. Fetch activity list
+        activities = list(activities_collection.find({"yieldId": ObjectId(yield_id)}))
+        
+        # Format activities list (to match frontend dates and amounts)
+        activities_with_dates = []
+        for act in activities:
+            created_at = act.get('created_at') or act.get('date')
+            if isinstance(created_at, str):
+                try:
+                    # Try to parse ISO date string
+                    created_at = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                except Exception:
+                    created_at = datetime.utcnow()
+            elif not isinstance(created_at, datetime):
+                created_at = datetime.utcnow()
+            
+            activities_with_dates.append({
+                'type': act.get('activity_type', 'Other'),
+                'amount': float(act.get('amount', 0)),
+                'date': created_at
+            })
+            
+        # Sort activities by date
+        activities_with_dates.sort(key=lambda x: x['date'])
+        
+        now = datetime.now()
+        current_year = now.year
+        current_month = now.month
+        
+        # Group actual expenses and income by month
+        actual_points = []
+        
+        # Helper to format month-year key: e.g., "Jun 26"
+        def format_month_key(dt):
+            return dt.strftime("%b %y")
+            
+        if activities_with_dates:
+            earliest_date = activities_with_dates[0]['date']
+            # Limit history to 6 months ago
+            six_months_ago = datetime(now.year - (1 if now.month <= 6 else 0), (now.month - 6) if now.month > 6 else (now.month + 6), 1)
+            start_date = max(earliest_date, six_months_ago)
+            
+            # Generate calendar months from start_date up to the month before current
+            curr = datetime(start_date.year, start_date.month, 1)
+            history_months = []
+            while curr < datetime(current_year, current_month, 1):
+                history_months.append(curr)
+                # Next month
+                if curr.month == 12:
+                    curr = datetime(curr.year + 1, 1, 1)
+                else:
+                    curr = datetime(curr.year, curr.month + 1, 1)
+                    
+            # Sum amounts for each history month
+            for m_dt in history_months:
+                m_start = datetime(m_dt.year, m_dt.month, 1)
+                if m_dt.month == 12:
+                    m_end = datetime(m_dt.year + 1, 1, 1)
+                else:
+                    m_end = datetime(m_dt.year, m_dt.month + 1, 1)
+                    
+                m_activities = [a for a in activities_with_dates if m_start <= a['date'] < m_end]
+                
+                investment = sum(a['amount'] for a in m_activities if a['amount'] > 0)
+                revenue = sum(abs(a['amount']) for a in m_activities if a['amount'] < 0)
+                profit = revenue - investment
+                
+                actual_points.append({
+                    "month": format_month_key(m_dt),
+                    "investment": int(round(investment)),
+                    "revenue": int(round(revenue)),
+                    "profit": int(round(profit)),
+                    "isProjected": False
+                })
+
+        # 3. Future Projections (Current month + next 5 months = 6 months)
+        projected_points = []
+        assumptions = []
+        
+        # Calculate overall averages from actual expenses
+        expense_activities = [a for a in activities_with_dates if a['amount'] > 0]
+        income_activities = [a for a in activities_with_dates if a['amount'] < 0]
+        
+        overall_avg_expense = 5000.0  # Default baseline if no history
+        if expense_activities:
+            overall_avg_expense = sum(a['amount'] for a in expense_activities) / len(expense_activities)
+            
+        # Get historical monthly average for the last 3 months
+        monthly_expense_totals = {}
+        for a in expense_activities:
+            key = (a['date'].year, a['date'].month)
+            monthly_expense_totals[key] = monthly_expense_totals.get(key, 0.0) + a['amount']
+            
+        historical_expenses = list(monthly_expense_totals.values())
+        if historical_expenses:
+            recent_monthly_avg = sum(historical_expenses[-3:]) / min(3, len(historical_expenses))
+        else:
+            recent_monthly_avg = overall_avg_expense
+            
+        # Crop Lifecycle Policy Setup
+        crop_type = (yield_obj.get('type') or yield_obj.get('name') or "Crop").strip().lower()
+        acres = float(yield_obj.get('acres') or 1.0)
+        days_remain = int(yield_obj.get('daysRemain') or 180)
+        remaining_months = max(1, min(6, int(round(days_remain / 30.0))))
+        
+        # Crop Lifecycle configurations (standard cost per acre for pending stages)
+        crop_lifecycles = {
+            "sugarcane": {
+                "duration": 12,
+                "stages": ["cultivation", "sowing", "fertilizer", "irrigation", "pesticide", "harvesting", "financial"],
+                "costs": {"cultivation": 3500, "sowing": 3000, "fertilizer": 5000, "irrigation": 3000, "pesticide": 2500, "harvesting": 6000, "financial": 1000}
+            },
+            "wheat": {
+                "duration": 5,
+                "stages": ["cultivation", "sowing", "fertilizer", "irrigation", "pesticide", "harvesting", "financial"],
+                "costs": {"cultivation": 3000, "sowing": 2500, "fertilizer": 4000, "irrigation": 2000, "pesticide": 2000, "harvesting": 5000, "financial": 800}
+            },
+            "rice": {
+                "duration": 4,
+                "stages": ["cultivation", "sowing", "fertilizer", "irrigation", "pesticide", "harvesting", "financial"],
+                "costs": {"cultivation": 3200, "sowing": 2800, "fertilizer": 4500, "irrigation": 3500, "pesticide": 3000, "harvesting": 5000, "financial": 800}
+            },
+            "paddy": {
+                "duration": 4,
+                "stages": ["cultivation", "sowing", "fertilizer", "irrigation", "pesticide", "harvesting", "financial"],
+                "costs": {"cultivation": 3200, "sowing": 2800, "fertilizer": 4500, "irrigation": 3500, "pesticide": 3000, "harvesting": 5000, "financial": 800}
+            },
+            "cotton": {
+                "duration": 6,
+                "stages": ["cultivation", "sowing", "fertilizer", "irrigation", "pesticide", "harvesting", "financial"],
+                "costs": {"cultivation": 3000, "sowing": 2500, "fertilizer": 4500, "irrigation": 2500, "pesticide": 5000, "harvesting": 5500, "financial": 1000}
+            },
+            "tomato": {
+                "duration": 4,
+                "stages": ["cultivation", "sowing", "fertilizer", "irrigation", "pesticide", "harvesting", "financial"],
+                "costs": {"cultivation": 3000, "sowing": 2500, "fertilizer": 4000, "irrigation": 2500, "pesticide": 4000, "harvesting": 4500, "financial": 800}
+            }
+        }
+        
+        # Match crop type
+        matched_crop = None
+        for k in crop_lifecycles.keys():
+            if k in crop_type:
+                matched_crop = k
+                break
+                
+        if matched_crop:
+            lifecycle = crop_lifecycles[matched_crop]
+            assumptions.append(f"Applying server-side lifecycle policy for crop type: {matched_crop.capitalize()}.")
+        else:
+            # Default fallback policy
+            lifecycle = {
+                "duration": 6,
+                "stages": ["cultivation", "sowing", "fertilizer", "irrigation", "pesticide", "harvesting", "financial"],
+                "costs": {"cultivation": 3000, "sowing": 2500, "fertilizer": 4000, "irrigation": 2500, "pesticide": 3000, "harvesting": 5000, "financial": 800}
+            }
+            assumptions.append("Applying standard crop lifecycle baseline policies.")
+            
+        # Determine completed vs pending stages
+        completed_stages = set(a['type'].lower() for a in activities_with_dates)
+        pending_stages = [stage for stage in lifecycle["stages"] if stage not in completed_stages]
+        
+        if pending_stages:
+            assumptions.append("Pending lifecycle stages identified: " + ", ".join(s.capitalize() for s in pending_stages) + ".")
+        else:
+            assumptions.append("All primary lifecycle activity stages have already been logged.")
+            
+        # Check weather risk factor (if set by backend, or default)
+        user_weather_risk = float(yield_obj.get('weatherRiskFactor') or 1.0)
+        
+        # Generate 6 projected months starting from current month
+        projected_months = []
+        curr = datetime(current_year, current_month, 1)
+        for _ in range(6):
+            projected_months.append(curr)
+            if curr.month == 12:
+                curr = datetime(curr.year + 1, 1, 1)
+            else:
+                curr = datetime(curr.year, curr.month + 1, 1)
+                
+        # Simulate Weather Policy for the next 6 months
+        weather_forecast = []
+        monthly_weather_risks = []
+        
+        for p_dt in projected_months:
+            m_idx = p_dt.month
+            if m_idx in [11, 12, 1, 2]:
+                temp = random.randint(16, 22)
+                rain = random.randint(5, 20)
+                humi = random.randint(45, 55)
+                season = "Winter"
+                risk_lvl = "Low"
+                risk_f = 0.9 * user_weather_risk
+            elif m_idx in [3, 4, 5]:
+                temp = random.randint(34, 41)
+                rain = random.randint(5, 15)
+                humi = random.randint(30, 40)
+                season = "Summer"
+                risk_lvl = "Medium"
+                risk_f = 1.15 * user_weather_risk
+            else:
+                temp = random.randint(25, 30)
+                rain = random.randint(200, 380)
+                humi = random.randint(75, 88)
+                season = "Monsoon"
+                risk_lvl = "High" if matched_crop in ["tomato", "cotton"] else "Medium"
+                risk_f = 1.25 * user_weather_risk
+                
+            weather_forecast.append({
+                "month": format_month_key(p_dt),
+                "temperature": temp,
+                "rainfall": rain,
+                "humidity": humi,
+                "season": season,
+                "riskLevel": risk_lvl,
+                "riskFactor": risk_f
+            })
+            monthly_weather_risks.append(risk_f)
+
+        # Distribute pending stage costs over the remaining months slots
+        allocated_stage_costs = [0.0] * 6
+        
+        for idx, stage in enumerate(pending_stages):
+            stage_history = [a['amount'] for a in activities_with_dates if a['type'].lower() == stage and a['amount'] > 0]
+            if stage_history:
+                hist_avg = sum(stage_history) / len(stage_history)
+                estimated_cost = (hist_avg * 0.6) + (lifecycle["costs"].get(stage, 3000) * acres * 0.4)
+            else:
+                estimated_cost = lifecycle["costs"].get(stage, 3000) * acres
+                
+            slot = min(5, int((idx * remaining_months) / max(1, len(pending_stages))))
+            allocated_stage_costs[slot] += estimated_cost
+
+        # Calculate revenue projection basis
+        expected_price = float(yield_obj.get('expectedPricePerUnit') or 0.0)
+        expected_yield = float(yield_obj.get('expectedYield') or 0.0)
+        
+        if expected_yield <= 0.0 and float(yield_obj.get('expectedYieldPerAcre') or 0.0) > 0.0:
+            expected_yield = float(yield_obj['expectedYieldPerAcre']) * acres
+            
+        revenue_basis_note = ""
+        total_projected_revenue = 0.0
+        
+        if expected_price > 0.0 and expected_yield > 0.0:
+            total_projected_revenue = expected_price * expected_yield
+            revenue_basis_note = f"Revenue projected from user-supplied expected yield ({expected_yield} units) and price (₹{expected_price}/unit)."
+        elif matched_crop:
+            baselines = {
+                "sugarcane": {"yield_acre": 35.0, "price": 3200.0, "units": "tonnes"},
+                "wheat": {"yield_acre": 22.0, "price": 2275.0, "units": "quintals"},
+                "rice": {"yield_acre": 20.0, "price": 2200.0, "units": "quintals"},
+                "paddy": {"yield_acre": 20.0, "price": 2200.0, "units": "quintals"},
+                "cotton": {"yield_acre": 12.0, "price": 7000.0, "units": "quintals"},
+                "tomato": {"yield_acre": 120.0, "price": 1500.0, "units": "quintals"}
+            }
+            base = baselines[matched_crop]
+            total_projected_revenue = base["yield_acre"] * acres * base["price"]
+            revenue_basis_note = f"Expected yield not specified. Using regional baseline for {matched_crop.capitalize()} ({base['yield_acre']} {base['units']}/acre at ₹{base['price']}/{base['units']}) as fallback."
+        elif len(income_activities) >= 2:
+            avg_income = sum(abs(a['amount']) for a in income_activities) / len(income_activities)
+            total_projected_revenue = avg_income * 6
+            revenue_basis_note = "Expected yield not specified. Revenue projected from historical income activities average."
+            
+        if revenue_basis_note:
+            assumptions.append(revenue_basis_note)
+            
+        # Fallback check
+        if len(expense_activities) < 2 and not matched_crop:
+            return jsonify({
+                "available": False,
+                "points": [],
+                "summary": None,
+                "reason": "Forecast needs at least 2 logged expense activities or a specified crop type/acres to apply regional lifecycle templates.",
+                "assumptions": ["Add more real farm records or update crop details to unlock forecast insights."]
+            }), 200
+
+        # Build monthly projection values
+        for i, p_dt in enumerate(projected_months):
+            risk_f = monthly_weather_risks[i]
+            
+            base_inv = recent_monthly_avg * risk_f
+            stage_inv = allocated_stage_costs[i] * risk_f
+            investment = int(round(base_inv + stage_inv))
+            
+            revenue = 0.0
+            if "historical income" in revenue_basis_note:
+                revenue = total_projected_revenue / 6.0 * risk_f
+            elif total_projected_revenue > 0.0:
+                harvest_slot = min(5, remaining_months - 1)
+                pre_harvest_slot = max(0, harvest_slot - 1)
+                
+                if harvest_slot == pre_harvest_slot:
+                    if i == harvest_slot:
+                        revenue = total_projected_revenue * risk_f
+                else:
+                    if i == pre_harvest_slot:
+                        revenue = total_projected_revenue * 0.2 * risk_f
+                    elif i == harvest_slot:
+                        revenue = total_projected_revenue * 0.8 * risk_f
+                        
+            revenue = int(round(revenue))
+            profit = int(round(revenue - investment))
+            
+            projected_points.append({
+                "month": format_month_key(p_dt),
+                "investment": max(0, investment),
+                "revenue": max(0, revenue),
+                "profit": profit,
+                "isProjected": True
+            })
+            
+        combined_points = actual_points + projected_points
+        
+        total_investment = sum(p["investment"] for p in projected_points)
+        total_profit = sum(p["profit"] for p in projected_points)
+        
+        highest_inv_point = max(combined_points, key=lambda x: x["investment"])
+        highest_profit_point = max(combined_points, key=lambda x: x["profit"])
+        
+        roi = 0.0
+        if total_investment > 0:
+            roi = (float(total_profit) / float(total_investment)) * 100.0
+            
+        summary = {
+            "totalInvestment": total_investment,
+            "totalProfit": total_profit,
+            "highestInvestmentMonth": {
+                "month": highest_inv_point["month"],
+                "investment": highest_inv_point["investment"],
+                "revenue": highest_inv_point["revenue"],
+                "profit": highest_inv_point["profit"]
+            },
+            "highestProfitMonth": {
+                "month": highest_profit_point["month"],
+                "investment": highest_profit_point["investment"],
+                "revenue": highest_profit_point["revenue"],
+                "profit": highest_profit_point["profit"]
+            },
+            "roiPercent": round(roi, 2)
+        }
+        
+        avg_risk = sum(monthly_weather_risks) / 6.0
+        if avg_risk > 1.1:
+            assumptions.append("Weather risk is elevated for the projection period. Projections adjusted accordingly.")
+        else:
+            assumptions.append("Weather conditions are projected to be standard. Baseline risk levels applied.")
+            
+        return jsonify({
+            "available": True,
+            "points": combined_points,
+            "summary": summary,
+            "assumptions": assumptions,
+            "weatherForecast": weather_forecast
+        }), 200
+        
+    except Exception as e:
+        print(f"Error generating forecast: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# Call the seed function at startup
+seed_demo_data()
+
 # ------------------ Cost Reduction Suggestions API ------------------
 @app.route('/api/cost-reduction-suggestions', methods=['POST'])
 @token_required
@@ -2202,11 +2842,53 @@ def get_cost_reduction_suggestions(current_user):
             print(f"Error calling Gemini API: {str(gemini_error)}")
             import traceback
             traceback.print_exc()
-            # Return mock data as fallback
+            
+            # Attempt to call Groq API as an intelligent fallback
+            try:
+                print("Gemini failed. Attempting to call Groq API as fallback...")
+                groq_api_key = os.getenv("GROQ_API_KEY")
+                if groq_api_key:
+                    groq_client = Groq(api_key=groq_api_key)
+                    chat_completion = groq_client.chat.completions.create(
+                        model="llama-3.3-70b-versatile",
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": "You are an agricultural financial advisor. Return ONLY a valid JSON object matching the requested schema. Do not include markdown code block formatting (like ```json) or explanation."
+                            },
+                            {
+                                "role": "user",
+                                "content": prompt
+                            }
+                        ],
+                        temperature=0.2,
+                        max_completion_tokens=600
+                    )
+                    groq_response = chat_completion.choices[0].message.content.strip()
+                    print(f"Raw Groq response (first 100 chars): {groq_response[:100]}...")
+                    
+                    cleaned_groq_json = groq_response.replace('```json\n', '').replace('```\n', '').replace('```', '').strip()
+                    try:
+                        suggestions_data = json.loads(cleaned_groq_json)
+                        print("Successfully parsed Groq response as JSON")
+                        return jsonify({
+                            "status": "success",
+                            "data": suggestions_data,
+                            "note": "Generated dynamically using Groq LLM"
+                        }), 200
+                    except json.JSONDecodeError as json_err:
+                        print(f"Error parsing Groq JSON: {json_err}")
+                else:
+                    print("Groq API key not configured")
+            except Exception as groq_err:
+                print(f"Error calling Groq API fallback: {str(groq_err)}")
+                traceback.print_exc()
+                
+            # Fallback to mock data if both LLMs fail
             return jsonify({
                 "status": "success",
                 "data": mock_data,
-                "note": "Using fallback data due to API error"
+                "note": "Using fallback static data due to LLM errors"
             }), 200
     
     except Exception as e:

@@ -14,7 +14,6 @@ from bson import ObjectId
 from functools import wraps
 import pickle as pkl
 import re
-from plant_disease_model import predict_disease
 from flask_cors import CORS
 import os
 from bson.objectid import ObjectId
@@ -323,66 +322,101 @@ def plant_disease_analysis():
     image.save(image_path)
 
     try:
-        if not PLANT_DISEASE_GROQ_API_KEY:
-            app.logger.error("[plant_disease_analysis] Missing GROQ_API_KEY environment variable")
-            return jsonify({"error": "Server configuration error: GROQ_API_KEY is missing"}), 500
+        from PIL import Image
+        import json
+        
+        # Load environment API Key
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            app.logger.error("[plant_disease_analysis] Missing GEMINI_API_KEY environment variable")
+            if os.path.exists(image_path):
+                os.remove(image_path)
+            return jsonify({"error": "Server configuration error: GEMINI_API_KEY is missing"}), 500
 
-        result = predict_disease(image_path)
-    
-        predicted_label = result['class']
-        confidence = round(result['confidence']*100,2)
+        # Configure the Gemini API
+        genai.configure(api_key=api_key)
+        
+        # Initialize Gemini 2.5 Flash model
+        model = genai.GenerativeModel("gemini-2.5-flash")
+        
+        prompt = """
+        You are an expert plant pathologist and agricultural consultant.
+        Analyze the attached plant leaf/crop image.
+        Identify:
+        1. The name of the plant/crop (e.g., Tomato, Wheat, Potato).
+        2. Any disease present on the plant, or if it is healthy.
+        
+        Generate a structured JSON output with these exact keys:
+        - "predictedDisease": The name of the predicted disease class (e.g. 'Tomato_Early_blight', 'Tomato_healthy', 'Potato_Late_blight', 'Wheat_Rust', etc.).
+        - "confidence": A float confidence score between 0.0 and 1.0 (e.g. 0.95).
+        - "analysis": A JSON object containing the detailed analysis with these exact keys:
+            - "diseaseName": "Name of the disease"
+            - "description": "Scientific and general overview of the disease"
+            - "causes": "Possible causes or conditions for this disease"
+            - "symptoms": "Visual and physical symptoms to look out for"
+            - "recommendations": "Best practices to handle this disease"
+            - "doses": "Pesticide/fertilizer doses and frequency if applicable"
 
-
-        prompt = f"""
-        The plant disease predicted is: **{predicted_label}**.
-
-        As a plant pathology expert, generate a structured, informative JSON object with the following keys:
-        {{
-            "diseaseName": "Name of the disease",
-            "description": "Scientific and general overview of the disease",
-            "causes": "Possible causes or conditions for this disease",
-            "symptoms": "Visual and physical symptoms to look out for",
-            "recommendations": "Best practices to handle this disease",
-            "doses": "Pesticide/fertilizer doses and frequency if applicable"
-        }}
-
-        Please be precise and strictly return only the valid JSON, no extra explanation.
+        Return ONLY the raw valid JSON block, do not wrap in markdown or anything else.
         """
-
-        # Initialize Groq client with API key
-        client = Groq(api_key=PLANT_DISEASE_GROQ_API_KEY)
-
-        # Make the chat completion request
-        chat_completion = client.chat.completions.create(
-            model=PLANT_DISEASE_GROQ_MODEL,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are a helpful assistant with deep agricultural and plant pathology knowledge."
-                },
-                {
-                    "role": "user",
-                    "content": prompt
+        
+        # Open and load image using PIL context manager to release file lock on Windows
+        print("Sending crop health image to Gemini 2.5 Flash...")
+        with Image.open(image_path) as img:
+            response = model.generate_content([prompt, img])
+        
+        if not response or not response.text:
+            raise Exception("Empty response from Gemini Vision API")
+            
+        text = response.text.strip()
+        
+        # Clean up any potential markdown delimiters
+        text = re.sub(r"^```json\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"^```\s*", "", text)
+        text = re.sub(r"```$", "", text)
+        text = text.strip()
+        
+        # Parse JSON to format it appropriately for the frontend
+        try:
+            data = json.loads(text)
+        except Exception as json_err:
+            print(f"Error parsing Gemini response text as JSON: {json_err}. Raw text: {text}")
+            # Try to extract JSON using regex
+            json_match = re.search(r"\{[\s\S]*\}", text)
+            if json_match:
+                data = json.loads(json_match.group(0))
+            else:
+                raise json_err
+                
+        predicted_disease = data.get("predictedDisease", "Unknown")
+        raw_conf = data.get("confidence", 0.95)
+        # Convert confidence to percentage formatted to 2 decimals
+        confidence = round(raw_conf * 100.0, 2) if raw_conf <= 1.0 else round(raw_conf, 2)
+        
+        # Ensure the analysis field is a structured dictionary/object
+        analysis_val = data.get("analysis", {})
+        if isinstance(analysis_val, str):
+            try:
+                analysis_val = json.loads(analysis_val)
+            except Exception:
+                analysis_val = {
+                    "diseaseName": predicted_disease.replace("_", " "),
+                    "description": analysis_val,
+                    "causes": "N/A",
+                    "symptoms": "N/A",
+                    "recommendations": "N/A",
+                    "doses": "N/A"
                 }
-            ],
-            temperature=0.5,
-            max_completion_tokens=1024,
-            top_p=1,
-            stop=None,
-            stream=False
-        )
-
-# Extract the response
-        detailed_info = chat_completion.choices[0].message.content.strip()
-
-
+            
+        # Clean up the local image file
+        if os.path.exists(image_path):
+            os.remove(image_path)
+            
         return jsonify({
-            "predictedDisease": predicted_label,
+            "predictedDisease": predicted_disease,
             "confidence": confidence,
-            "analysis": detailed_info
+            "analysis": analysis_val
         }), 200
-
-
 
     except Exception as e:
         app.logger.exception(
@@ -390,7 +424,9 @@ def plant_disease_analysis():
             getattr(image, "filename", "<unknown>"),
             str(e),
         )
-        return jsonify({"error": str(e)}), 500
+        if os.path.exists(image_path):
+            os.remove(image_path)
+        return jsonify({"error": f"Failed to analyze image: {str(e)}"}), 500
 # ------------------ Crop Recommendation ------------------
 @app.route('/api/crop-recommendation', methods=['POST'])
 def crop_recommendation():
